@@ -1,4 +1,3 @@
-# app.py
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_mysqldb import MySQL
 import MySQLdb.cursors
@@ -8,13 +7,15 @@ from functools import wraps
 import os
 
 app = Flask(__name__)
-app.secret_key = 'secret123'  # TODO: move to env var in production
+app.secret_key = os.environ.get('SECRET_KEY', 'secret123')
 
 # ---------------- MySQL configuration ----------------
-app.config['MYSQL_HOST'] = 'localhost'
-app.config['MYSQL_USER'] = 'root'
-app.config['MYSQL_PASSWORD'] = ''
-app.config['MYSQL_DB'] = 'user_signup'
+app.config['MYSQL_HOST'] = os.environ.get('MYSQL_HOST', '127.0.0.1')
+app.config['MYSQL_USER'] = os.environ.get('MYSQL_USER', 'root')
+app.config['MYSQL_PASSWORD'] = os.environ.get('MYSQL_PASSWORD', '')
+app.config['MYSQL_DB'] = os.environ.get('MYSQL_DB', 'eventmanagement')
+app.config['MYSQL_PORT'] = int(os.environ.get('MYSQL_PORT', 3306))
+
 mysql = MySQL(app)
 
 # ---------------- Upload folders ----------------
@@ -33,12 +34,10 @@ def verify_password(stored: str, provided: str) -> bool:
     Accept both hashed (preferred) and legacy plaintext (fallback).
     """
     try:
-        # If stored is a hash, this returns True/False correctly
         if stored and stored.startswith(('pbkdf2:', 'scrypt:', 'bcrypt:')):
             return check_password_hash(stored, provided)
     except Exception:
         pass
-    # Legacy fallback: direct compare (plaintext in DB)
     return stored == provided
 
 def login_required_user(fn):
@@ -78,14 +77,10 @@ def admin_about():
     cursor.close()
     return render_template('admin_about.html', about_sections=about_sections)
 
-
 # ----- Admin Edit About -----
 @app.route('/admin/edit_about/<int:id>', methods=['GET', 'POST'])
+@login_required_admin
 def edit_about(id):
-    if 'admin' not in session:
-        flash("Please login first!", "warning")
-        return redirect(url_for('admin_login'))
-
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
     if request.method == 'POST':
@@ -109,7 +104,6 @@ def edit_about(id):
     section = cursor.fetchone()
     cursor.close()
     return render_template('admin_edit_about.html', section=section)
-
 
 # ----- User-Facing About Page -----
 @app.route('/about')
@@ -138,16 +132,13 @@ def media_g():
     cursor.close()
     return render_template('Media_g.html', media_items=media_items)
 
-# Contact page
 @app.route('/contact')
 def contact_page():
     cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
-    # Contact info
     cur.execute("SELECT * FROM contact_info WHERE id=1")
     contact = cur.fetchone()
 
-    # Core team info - only main 4 posts in proper order
     cur.execute("""
         SELECT * FROM team 
         WHERE role IN ('President','Co-President','Secretary','Treasurer')
@@ -158,34 +149,34 @@ def contact_page():
     cur.close()
     return render_template('contactus.html', contact=contact, team_members=core_team_members)
 
-
-
-# Send message route
 @app.route('/send_message', methods=['POST'])
 def send_message():
-    if request.method == 'POST':
-        name = request.form['name']
-        email = request.form['email']
-        message = request.form['message']
+    name = request.form['name']
+    email = request.form['email']
+    message = request.form['message']
 
-        cur = mysql.connection.cursor()
-        cur.execute("INSERT INTO contact_messages (name, email, message) VALUES (%s, %s, %s)",
-                    (name, email, message))
-        mysql.connection.commit()
-        cur.close()
+    cur = mysql.connection.cursor()
+    cur.execute(
+        "INSERT INTO contact_messages (name, email, message) VALUES (%s, %s, %s)",
+        (name, email, message)
+    )
+    mysql.connection.commit()
+    cur.close()
 
-        flash('Message sent successfully!', 'success')
-        return redirect(url_for('contact_page'))
+    flash('Message sent successfully!', 'success')
+    return redirect(url_for('contact_page'))
 
 @app.route('/faq')
 def faq():
     cur = mysql.connection.cursor()
     cur.execute("SELECT id, question, answer FROM faq")
-    faqs = cur.fetchall()  # list of tuples
+    faqs = cur.fetchall()
     cur.close()
     return render_template('faq.html', faqs=faqs)
+
 # Admin dashboard - list all FAQs
 @app.route('/admin/faqs')
+@login_required_admin
 def admin_faqs():
     cur = mysql.connection.cursor()
     cur.execute("SELECT id, question, answer FROM faq")
@@ -195,6 +186,7 @@ def admin_faqs():
 
 # Admin - Add new FAQ
 @app.route('/admin/add_faq', methods=['GET', 'POST'])
+@login_required_admin
 def add_faq():
     if request.method == 'POST':
         question = request.form['question']
@@ -209,6 +201,7 @@ def add_faq():
 
 # Admin - Edit FAQ
 @app.route('/admin/edit_faq/<int:id>', methods=['GET', 'POST'])
+@login_required_admin
 def edit_faq(id):
     cur = mysql.connection.cursor()
     if request.method == 'POST':
@@ -226,6 +219,7 @@ def edit_faq(id):
 
 # Admin - Delete FAQ
 @app.route('/admin/delete_faq/<int:id>', methods=['POST'])
+@login_required_admin
 def delete_faq(id):
     cur = mysql.connection.cursor()
     cur.execute("DELETE FROM faq WHERE id=%s", (id,))
@@ -233,6 +227,7 @@ def delete_faq(id):
     cur.close()
     flash("FAQ deleted successfully!", "success")
     return redirect(url_for('admin_faqs'))
+
 # ---------------- Admin Auth ----------------
 @app.route('/admin-login', methods=['GET', 'POST'])
 def admin_login():
@@ -348,10 +343,11 @@ def participants():
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
     base_query = """
-        SELECT p.id, p.name, p.email, p.phone_number, p.selected_events,
+        SELECT p.id, p.full_name, p.email, p.phone_number, p.selected_events,
                p.payment_method, p.payment_status
         FROM participants p
     """
+
     params = []
     where = []
 
@@ -360,9 +356,10 @@ def participants():
         filter_event = request.form.get('filter_event', '').strip()
 
         if search_name:
-            where.append("(p.name LIKE %s OR p.email LIKE %s)")
+            where.append("(p.full_name LIKE %s OR p.email LIKE %s)")
             like = f"%{search_name}%"
             params.extend([like, like])
+
         if filter_event:
             where.append("FIND_IN_SET(%s, p.selected_events)")
             params.append(filter_event)
@@ -375,12 +372,15 @@ def participants():
     cursor.execute(base_query, tuple(params))
     participants_list = cursor.fetchall()
 
-    # Fetch events for filter dropdown
     cursor.execute("SELECT DISTINCT name FROM events ORDER BY name ASC")
     events_list = [e['name'] for e in cursor.fetchall()]
 
     cursor.close()
-    return render_template('participants.html', participants=participants_list, events_list=events_list)
+    return render_template(
+        'participants.html',
+        participants=participants_list,
+        events_list=events_list
+    )
 
 @app.route('/delete-participant/<int:id>')
 @login_required_admin
@@ -391,7 +391,6 @@ def delete_participant(id):
     cursor.close()
     flash("Participant removed successfully!", "success")
     return redirect(url_for('participants'))
-
 
 #----------------Transactions---------------
 @app.route('/transactions', methods=['GET', 'POST'])
@@ -417,18 +416,22 @@ def transactions():
     filter_event = request.args.get('filter_event', '').strip()
 
     query = """
-        SELECT p.id, p.name, p.email, p.phone_number, p.selected_events,
+        SELECT p.id, p.full_name, p.email, p.phone_number, p.selected_events,
                p.payment_method, p.payment_status
         FROM participants p
     """
+
     conditions, params = [], []
+
     if search_name:
-        conditions.append("(p.name LIKE %s OR p.email LIKE %s)")
+        conditions.append("(p.full_name LIKE %s OR p.email LIKE %s)")
         like = f"%{search_name}%"
         params.extend([like, like])
+
     if filter_event:
         conditions.append("FIND_IN_SET(%s, p.selected_events)")
         params.append(filter_event)
+
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
 
@@ -437,16 +440,17 @@ def transactions():
     cursor.execute(query, tuple(params))
     transactions_list = cursor.fetchall()
 
-    # Fetch events for filter dropdown
     cursor.execute("SELECT DISTINCT name FROM events ORDER BY name ASC")
     events_list = [e['name'] for e in cursor.fetchall()]
 
     cursor.close()
-    return render_template('transactions.html',
-                           transactions=transactions_list,
-                           events_list=events_list,
-                           search_name=search_name,
-                           filter_event=filter_event)
+    return render_template(
+        'transactions.html',
+        transactions=transactions_list,
+        events_list=events_list,
+        search_name=search_name,
+        filter_event=filter_event
+    )
 
 # ---------------- Admin: QR Manager ----------------
 @app.route('/upload-qr', methods=['GET', 'POST'])
@@ -490,7 +494,7 @@ def media_manager():
 def add_media():
     if request.method == 'POST':
         filename = request.form['filename'].strip()
-        filetype = request.form['filetype'].strip()  # 'image' or 'video'
+        filetype = request.form['filetype'].strip()
         file = request.files.get('file')
 
         if file and filename and filetype in ('image', 'video'):
@@ -536,7 +540,7 @@ def edit_media(id):
             filepath = f'uploads/{folder}/{secure_name}'
             file.save(os.path.join(app.config['UPLOAD_FOLDER'], folder, secure_name))
         else:
-            filepath = media['filepath']  # keep old path
+            filepath = media['filepath']
 
         cursor.execute(
             "UPDATE media SET filename=%s, filetype=%s, filepath=%s WHERE id=%s",
@@ -657,10 +661,8 @@ def delete_coordinator(id):
 
 #-----------------Contactus__________________
 @app.route('/admin/contact_edit', methods=['GET', 'POST'])
+@login_required_admin
 def admin_contact_edit():
-    if 'admin' not in session:
-        return redirect(url_for('admin_login'))
-
     cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
     cur.execute("SELECT * FROM contact_info WHERE id=1")
     contact = cur.fetchone()
@@ -686,28 +688,17 @@ def admin_contact_edit():
 
     cur.close()
     return render_template('Contact_Messages.html', contact=contact)
+
 @app.route('/admin/contact_messages')
+@login_required_admin
 def contact_messages():
-    if 'admin' not in session:
-        flash("Please login as admin to view messages.", "danger")
-        return redirect(url_for('admin_login'))
-
-    cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
-    cur.execute("SELECT * FROM contact_messages ORDER BY date_sent DESC")
-    messages = cur.fetchall()
-    cur.close()
-    return render_template('contact_messages_admin.html', messages=messages)
-@app.route('/admin/contact_messages')
-def contact_messages_view():
     cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
     cur.execute("SELECT * FROM contact_messages ORDER BY date_sent DESC")
     messages = cur.fetchall()
     cur.close()
     return render_template('contact_messages_admin.html', messages=messages)
 
-# ---------------- Winners (fixed duplicate routes) ----------------
-
-
+# ---------------- Winners ----------------
 @app.route('/winners_list_admin')
 @login_required_admin
 def winners_list_admin():
@@ -717,7 +708,6 @@ def winners_list_admin():
     cursor.close()
     return render_template('Winners.html', winners=winners)
 
-# Public/User view
 @app.route('/winners_list')
 def winners_list():
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
@@ -810,62 +800,6 @@ def delete_winner(id):
 def team_view():
     cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
-    # Core Team
-    cur.execute("""
-            SELECT * FROM team
-            WHERE role IN ('President','Co-President','Secretary','Treasurer')
-            ORDER BY FIELD(role,'President','Co-President','Secretary','Treasurer')
-        """)
-    core_team = cur.fetchall()
-
-    # Other Members (बाकी)
-    cur.execute("""
-            SELECT * FROM team
-            WHERE role NOT IN (
-                'President','Co-President','Secretary','Treasurer',
-                'Vice Secretary',
-                'Resource Management Head',
-                'Technical Adviser Head',
-                'Marketing & Advertisement Head',
-                'Discipline Management Head',
-                'Girl Representative Head',
-                'Decoration Head'
-            )
-            ORDER BY name ASC
-        """)
-    other_members = cur.fetchall()
-
-    # Fixed Special Positions
-    fixed_roles = [
-        "Vice Secretary",
-        "Resource Management Head",
-        "Technical Adviser Head",
-        "Marketing & Advertisement Head",
-        "Discipline Management Head",
-        "Girl Representative Head",
-        "Decoration Head"
-    ]
-
-    members = {}
-    for role in fixed_roles:
-        cur.execute("SELECT * FROM team WHERE role=%s LIMIT 1", (role,))
-        member = cur.fetchone()  # None if not exists
-        members[role] = member
-
-    cur.close()
-    return render_template(
-        'team.html',
-        core_team=core_team,
-        other_members=other_members,
-        fixed_roles=fixed_roles,
-        members=members
-    )
-
-@app.route('/team_view_home')
-def team_view_home():
-    cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
-
-    # Core Team
     cur.execute("""
         SELECT * FROM team
         WHERE role IN ('President','Co-President','Secretary','Treasurer')
@@ -873,7 +807,6 @@ def team_view_home():
     """)
     core_team = cur.fetchall()
 
-    # Other Members (बाकी)
     cur.execute("""
         SELECT * FROM team
         WHERE role NOT IN (
@@ -890,7 +823,6 @@ def team_view_home():
     """)
     other_members = cur.fetchall()
 
-    # Fixed Special Positions
     fixed_roles = [
         "Vice Secretary",
         "Resource Management Head",
@@ -904,7 +836,59 @@ def team_view_home():
     members = {}
     for role in fixed_roles:
         cur.execute("SELECT * FROM team WHERE role=%s LIMIT 1", (role,))
-        member = cur.fetchone()  # None if not exists
+        member = cur.fetchone()
+        members[role] = member
+
+    cur.close()
+    return render_template(
+        'team.html',
+        core_team=core_team,
+        other_members=other_members,
+        fixed_roles=fixed_roles,
+        members=members
+    )
+
+@app.route('/team_view_home')
+def team_view_home():
+    cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
+
+    cur.execute("""
+        SELECT * FROM team
+        WHERE role IN ('President','Co-President','Secretary','Treasurer')
+        ORDER BY FIELD(role,'President','Co-President','Secretary','Treasurer')
+    """)
+    core_team = cur.fetchall()
+
+    cur.execute("""
+        SELECT * FROM team
+        WHERE role NOT IN (
+            'President','Co-President','Secretary','Treasurer',
+            'Vice Secretary',
+            'Resource Management Head',
+            'Technical Adviser Head',
+            'Marketing & Advertisement Head',
+            'Discipline Management Head',
+            'Girl Representative Head',
+            'Decoration Head'
+        )
+        ORDER BY name ASC
+    """)
+    other_members = cur.fetchall()
+
+    fixed_roles = [
+        "Vice Secretary",
+        "Resource Management Head",
+        "Technical Adviser Head",
+        "Marketing & Advertisement Head",
+        "Discipline Management Head",
+        "Girl Representative Head",
+        "Decoration Head"
+    ]
+
+    members = {}
+    for role in fixed_roles:
+        cur.execute("SELECT * FROM team WHERE role=%s LIMIT 1", (role,))
+        member = cur.fetchone()
         members[role] = member
 
     cur.close()
@@ -916,15 +900,11 @@ def team_view_home():
         members=members
     )
 
-
-
-
 @app.route('/team_admin')
 @login_required_admin
 def admin_team():
     cur = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
-    # Core Team (Fixed 4 roles)
     cur.execute("""
         SELECT * FROM team
         WHERE role IN ('President','Co-President','Secretary','Treasurer')
@@ -932,7 +912,6 @@ def admin_team():
     """)
     core_team = cur.fetchall()
 
-    # Special Heads (Fixed 7 roles)
     special_heads_list = [
         'Vice Secretary',
         'Resource Management Head',
@@ -957,7 +936,6 @@ def admin_team():
     """, tuple(special_heads_list))
     special_heads = cur.fetchall()
 
-    # Other Members (exclude core + special heads)
     cur.execute("""
         SELECT * FROM team
         WHERE role NOT IN (
@@ -982,16 +960,14 @@ def admin_team():
         other_members=other_members
     )
 
-
-
 @app.route('/admin/team/add', methods=['GET', 'POST'])
 @login_required_admin
 def add_team_member():
     if request.method == 'POST':
         name = request.form['name'].strip()
         role = request.form['role'].strip()
-        category = request.form['category']  # core / other
-        email = request.form['phone_number'].strip()
+        category = request.form['category']
+        phone_number = request.form['phone_number'].strip()
         photo_file = request.files.get('photo')
 
         filename = None
@@ -1000,7 +976,6 @@ def add_team_member():
             photo_file.save(os.path.join(app.config['UPLOAD_FOLDER'], 'team', filename))
 
         cursor = mysql.connection.cursor()
-        phone_number = request.form['phone_number'].strip()
         cursor.execute(
             "INSERT INTO team (name, role, phone_number, category, photo) VALUES (%s, %s, %s, %s, %s)",
             (name, role, phone_number, category, filename)
@@ -1012,7 +987,6 @@ def add_team_member():
         return redirect(url_for('admin_team'))
 
     return render_template('add_team_member.html')
-
 
 @app.route('/admin/team/edit/<int:id>', methods=['GET', 'POST'])
 @login_required_admin
@@ -1029,19 +1003,17 @@ def edit_team_member(id):
     if request.method == 'POST':
         name = request.form['name'].strip()
         role = request.form['role'].strip()
-        category = request.form['category']  # core / other
+        category = request.form['category']
         phone_number = request.form['phone_number'].strip()
         photo_file = request.files.get('photo')
 
-        # Keep old photo if new not uploaded
         filename = member['photo']
         if photo_file and photo_file.filename:
             filename = secure_filename(photo_file.filename)
             photo_path = os.path.join(app.config['UPLOAD_FOLDER'], 'team', filename)
-            os.makedirs(os.path.dirname(photo_path), exist_ok=True)  # ensure folder exists
+            os.makedirs(os.path.dirname(photo_path), exist_ok=True)
             photo_file.save(photo_path)
 
-        # ✅ UPDATE instead of INSERT
         cursor.execute("""
             UPDATE team
             SET name=%s, role=%s, phone_number=%s, category=%s, photo=%s
@@ -1051,12 +1023,11 @@ def edit_team_member(id):
         mysql.connection.commit()
         cursor.close()
 
-        flash("✅ Member updated successfully!", "success")
+        flash("Member updated successfully!", "success")
         return redirect(url_for('admin_team'))
 
     cursor.close()
     return render_template('edit_team_member.html', member=member)
-
 
 @app.route('/admin/team/delete/<int:id>')
 @login_required_admin
@@ -1069,7 +1040,6 @@ def delete_team_member(id):
     return redirect(url_for('admin_team'))
 
 # ---------------- User Auth ----------------
-
 @app.route('/register_event', methods=['GET', 'POST'])
 def register_event():
     if request.method == 'POST':
@@ -1079,13 +1049,10 @@ def register_event():
         branch = request.form['branch'].strip()
         password = request.form['password']
 
-        # Hash the password
-        from werkzeug.security import generate_password_hash
         hashed = generate_password_hash(password)
 
         cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
-        # Check for existing email
         cursor.execute("SELECT * FROM user_signup WHERE email_address = %s", (email,))
         existing_email = cursor.fetchone()
         if existing_email:
@@ -1093,7 +1060,6 @@ def register_event():
             cursor.close()
             return redirect(url_for('register_event'))
 
-        # Check for existing username (optional)
         cursor.execute("SELECT * FROM user_signup WHERE user_name = %s", (username,))
         existing_username = cursor.fetchone()
         if existing_username:
@@ -1101,7 +1067,6 @@ def register_event():
             cursor.close()
             return redirect(url_for('register_event'))
 
-        # Insert new user
         cursor.execute("""
             INSERT INTO user_signup(name, email_address, user_name, branch, password)
             VALUES (%s, %s, %s, %s, %s)
@@ -1109,16 +1074,15 @@ def register_event():
         mysql.connection.commit()
         cursor.close()
 
-        flash("✅ Registration Successful!", "success")
-        return redirect(url_for('user_dashboard'))
+        flash("Registration Successful!", "success")
+        return redirect(url_for('login'))
 
     return render_template("register.html")
-
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        login_id = request.form['username'].strip()  # username or email
+        login_id = request.form['username'].strip()
         password = request.form['password']
 
         cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
@@ -1143,7 +1107,6 @@ def login():
 
 @app.route('/logout')
 def logout():
-    # Optional: mark user logged out in DB if you track that flag
     if 'email' in session:
         cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
         try:
@@ -1233,10 +1196,8 @@ def event_registration():
         selected_events = request.form.getlist('selected_events')
         payment_method = request.form['payment_method']
 
-        # Convert list to comma separated string
         selected_events_str = ', '.join(selected_events)
 
-        # Insert single row for participant
         cursor.execute("""
             INSERT INTO participants(full_name, email, phone_number, selected_events, payment_method, payment_status)
             VALUES (%s, %s, %s, %s, %s, %s)
@@ -1249,11 +1210,13 @@ def event_registration():
         return redirect(url_for('user_dashboard'))
 
     cursor.close()
-    return render_template('event_registration.html',
-                           full_name=full_name,
-                           email=email,
-                           events_list=events_list,
-                           qr_code=qr_code)
+    return render_template(
+        'event_registration.html',
+        full_name=full_name,
+        email=email,
+        events_list=events_list,
+        qr_code=qr_code
+    )
 
 # ---------------- Coordinators (user views) ----------------
 @app.route('/event_coordinators')
@@ -1307,11 +1270,10 @@ def year_winners():
     cursor.close()
     return render_template('winners_home.html', winners=winners)
 
-
 @app.route('/my-events')
 @login_required_user
 def my_events():
-    user_email = session['email']  # Logged-in user email
+    user_email = session['email']
     cursor = mysql.connection.cursor(MySQLdb.cursors.DictCursor)
 
     cursor.execute("""
@@ -1325,7 +1287,6 @@ def my_events():
 
     return render_template('my_events.html', user_events=user_events)
 
-
 # ---------------- App entry ----------------
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
